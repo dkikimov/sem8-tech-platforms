@@ -1,10 +1,13 @@
 using CdrBilling.Application.UseCases;
 using MediatR;
+using Microsoft.AspNetCore.Mvc;
 
 namespace CdrBilling.Api.Endpoints;
 
 public static class UploadEndpoints
 {
+    private const long MaxUploadSizeBytes = 2L * 1024 * 1024 * 1024;
+
     public static IEndpointRouteBuilder MapUploadEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/sessions/{sessionId:guid}").WithTags("Upload");
@@ -21,6 +24,8 @@ public static class UploadEndpoints
             return Results.Ok(result);
         })
         .DisableAntiforgery()
+        .WithMetadata(new RequestFormLimitsAttribute { MultipartBodyLengthLimit = MaxUploadSizeBytes })
+        .WithMetadata(new RequestSizeLimitAttribute(MaxUploadSizeBytes))
         .WithName("UploadCdr")
         .WithSummary("Upload CDR file (pipe-delimited)");
 
@@ -36,6 +41,8 @@ public static class UploadEndpoints
             return Results.Ok(result);
         })
         .DisableAntiforgery()
+        .WithMetadata(new RequestFormLimitsAttribute { MultipartBodyLengthLimit = MaxUploadSizeBytes })
+        .WithMetadata(new RequestSizeLimitAttribute(MaxUploadSizeBytes))
         .WithName("UploadTariff")
         .WithSummary("Upload tariff file (semicolon CSV)");
 
@@ -51,6 +58,8 @@ public static class UploadEndpoints
             return Results.Ok(result);
         })
         .DisableAntiforgery()
+        .WithMetadata(new RequestFormLimitsAttribute { MultipartBodyLengthLimit = MaxUploadSizeBytes })
+        .WithMetadata(new RequestSizeLimitAttribute(MaxUploadSizeBytes))
         .WithName("UploadSubscribers")
         .WithSummary("Upload subscriber base file (semicolon CSV)");
 

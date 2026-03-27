@@ -45,14 +45,16 @@ builder.Services.AddTransient<ISubscriberFileParser, SubscriberFileParser>();
 // ─── API ──────────────────────────────────────────────────────────────────────
 builder.Services.AddOpenApi();
 
-// Increase multipart body size limit for large CDR files (default 30 MB → 500 MB)
+const long MaxUploadSizeBytes = 2L * 1024 * 1024 * 1024;
+
+// Increase multipart body size limit for large CDR files (default 30 MB → 2 GB)
 builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o =>
 {
-    o.MultipartBodyLengthLimit = 500 * 1024 * 1024; // 500 MB
+    o.MultipartBodyLengthLimit = MaxUploadSizeBytes;
 });
 builder.WebHost.ConfigureKestrel(o =>
 {
-    o.Limits.MaxRequestBodySize = 500 * 1024 * 1024;
+    o.Limits.MaxRequestBodySize = MaxUploadSizeBytes;
 });
 
 // ─── CORS (allow all for development) ────────────────────────────────────────

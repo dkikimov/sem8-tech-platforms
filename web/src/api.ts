@@ -68,6 +68,19 @@ const UPLOAD_ENDPOINTS: Record<UploadKind, string> = {
   tariff: '/upload/tariff',
   subscribers: '/upload/subscribers',
 }
+const MAX_UPLOAD_SIZE_BYTES = 2 * 1024 * 1024 * 1024
+
+function formatFileSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  }
+
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`
+  }
+
+  return `${bytes} B`
+}
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, init)
@@ -98,6 +111,12 @@ export async function uploadFile(
   kind: UploadKind,
   file: File,
 ): Promise<UploadResult> {
+  if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+    throw new Error(
+      `Файл "${file.name}" слишком большой: ${formatFileSize(file.size)}. Максимальный размер загрузки — 2 GB.`,
+    )
+  }
+
   const formData = new FormData()
   formData.append('file', file)
 
