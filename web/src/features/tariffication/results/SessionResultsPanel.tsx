@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import filterIconUrl from '../../../assets/icons/filter.png'
 import { getCallRecords, getSummary } from '../../../api'
 import type { CallRecordDetail, PagedCallRecords, SubscriberSummary } from '../../../api'
@@ -40,7 +40,11 @@ function uniq(values: (string | null | undefined)[]) {
   return Array.from(new Set(values.filter(Boolean) as string[])).sort((a, b) => a.localeCompare(b))
 }
 
-export function SessionResultsPanel(props: { sessionId: string; busy: boolean; model: ResultsModel }) {
+export const SessionResultsPanel = memo(function SessionResultsPanel(props: {
+  sessionId: string
+  busy: boolean
+  model: ResultsModel
+}) {
   const [tab, setTab] = useState<TabKey>('summary')
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [selectedTariff, setSelectedTariff] = useState<CallRecordDetail['appliedTariff'] | null>(null)
@@ -59,34 +63,70 @@ export function SessionResultsPanel(props: { sessionId: string; busy: boolean; m
 
   const [summaryPage, setSummaryPage] = useState(1)
   const summaryPageSize = 20
+  const summaryLoadedForSessionRef = useRef<string | null>(null)
+  const callsCacheRef = useRef(new Map<string, PagedCallRecords>())
+  const inFlightCallsRef = useRef<string | null>(null)
 
   useEffect(() => {
-    if (props.model.summary.length > 0) return
+    if (summaryLoadedForSessionRef.current === props.sessionId) return
+
+    let cancelled = false
     void getSummary(props.sessionId)
-      .then(props.model.setSummary)
+      .then((nextSummary) => {
+        if (cancelled) return
+        summaryLoadedForSessionRef.current = props.sessionId
+        props.model.setSummary(nextSummary)
+      })
       .catch(() => {
         // errors are surfaced via existing error panel in flow; keep silent here
       })
-  }, [props.model.setSummary, props.model.summary.length, props.sessionId])
+    return () => {
+      cancelled = true
+    }
+  }, [props.model.setSummary, props.sessionId])
 
   useEffect(() => {
     setCallsPage(1)
+    setSummaryPage(1)
+    setSelectedTariff(null)
+    callsCacheRef.current.clear()
+    summaryLoadedForSessionRef.current = null
+    inFlightCallsRef.current = null
   }, [props.sessionId])
 
   useEffect(() => {
     if (tab !== 'calls') return
-    if (props.model.callRecords?.page === callsPage) return
-    void getCallRecords(
-      props.sessionId,
-      undefined,
-      callsPage,
-      callsPageSize,
-    )
-      .then(props.model.setCallRecords)
+    const cacheKey = `${props.sessionId}:${callsPage}:${callsPageSize}`
+    const cached = callsCacheRef.current.get(cacheKey)
+    if (cached) {
+      if (props.model.callRecords !== cached) {
+        props.model.setCallRecords(cached)
+      }
+      return
+    }
+
+    if (inFlightCallsRef.current === cacheKey) return
+
+    let cancelled = false
+    inFlightCallsRef.current = cacheKey
+    void getCallRecords(props.sessionId, undefined, callsPage, callsPageSize)
+      .then((pageResult) => {
+        if (cancelled) return
+        callsCacheRef.current.set(cacheKey, pageResult)
+        props.model.setCallRecords(pageResult)
+      })
       .catch(() => {
         // see note above
       })
-  }, [callsPage, callsPageSize, props.model.callRecords?.page, props.model.setCallRecords, props.sessionId, tab])
+      .finally(() => {
+        if (inFlightCallsRef.current === cacheKey) {
+          inFlightCallsRef.current = null
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [callsPage, callsPageSize, props.model.callRecords, props.model.setCallRecords, props.sessionId, tab])
 
   const filteredSummary = useMemo(() => {
     const phone = summaryFilters.phone.trim()
@@ -414,4 +454,4 @@ export function SessionResultsPanel(props: { sessionId: string; busy: boolean; m
       </div>
     </section>
   )
-}
+})

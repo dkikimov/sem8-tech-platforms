@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react'
-import type { PagedCallRecords, ProgressEventPayload, SubscriberSummary } from '../../../api'
+import type { ProgressEventPayload } from '../../../api'
 
 export type TarifficationSessionState = {
   sessionId: string | null
@@ -7,18 +7,12 @@ export type TarifficationSessionState = {
   finishedAtMs: number | null
   processingStatus: string
   progress: ProgressEventPayload | null
-  summary: SubscriberSummary[]
-  callRecords: PagedCallRecords | null
-  phoneFilter: string
 
   setSessionId: (id: string | null) => void
   setStartedAtMs: (value: number | null) => void
   setFinishedAtMs: (value: number | null) => void
   setProcessingStatus: (value: string) => void
   setProgress: (value: ProgressEventPayload | null) => void
-  setSummary: (value: SubscriberSummary[]) => void
-  setCallRecords: (value: PagedCallRecords | null) => void
-  setPhoneFilter: (value: string) => void
 
   resetSession: () => void
 }
@@ -32,4 +26,3 @@ export function useTarifficationSessionState() {
   }
   return ctx
 }
-

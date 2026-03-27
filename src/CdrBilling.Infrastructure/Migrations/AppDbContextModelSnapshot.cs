@@ -157,6 +157,12 @@ namespace CdrBilling.Infrastructure.Migrations
                     b.HasIndex("SessionId")
                         .HasDatabaseName("ix_cr_session");
 
+                    b.HasIndex("SessionId", "ComputedCharge")
+                        .HasDatabaseName("ix_cr_session_computed_charge");
+
+                    b.HasIndex("SessionId", "StartTime")
+                        .HasDatabaseName("ix_cr_session_start_time");
+
                     b.HasIndex("SessionId", "CalledParty")
                         .HasDatabaseName("ix_cr_called");
 

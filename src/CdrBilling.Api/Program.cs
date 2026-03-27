@@ -1,5 +1,6 @@
 using CdrBilling.Api.Endpoints;
 using CdrBilling.Application.Abstractions;
+using CdrBilling.Application.Options;
 using CdrBilling.Application.UseCases;
 using CdrBilling.Infrastructure.Parsing;
 using CdrBilling.Infrastructure.Persistence;
@@ -26,6 +27,9 @@ builder.Services.AddSingleton<NpgsqlDataSource>(_ =>
 // ─── CQRS ─────────────────────────────────────────────────────────────────────
 builder.Services.AddMediatR(cfg =>
     cfg.RegisterServicesFromAssembly(typeof(RunTarificationHandler).Assembly));
+builder.Services.AddSingleton(
+    builder.Configuration.GetSection(TarificationOptions.SectionName).Get<TarificationOptions>()
+    ?? new TarificationOptions());
 
 // ─── Repositories ─────────────────────────────────────────────────────────────
 builder.Services.AddScoped<IBillingSessionRepository, BillingSessionRepository>();

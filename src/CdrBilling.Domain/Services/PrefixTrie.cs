@@ -40,6 +40,13 @@ public sealed class PrefixTrie<TValue>
     public List<TValue> GetAllPrefixMatches(string input)
     {
         var results = new List<TValue>(4);
+        CollectPrefixMatches(input, results);
+        return results;
+    }
+
+    public void CollectPrefixMatches(string input, List<TValue> results)
+    {
+        results.Clear();
         var node = _root;
 
         if (node.HasValue)
@@ -54,7 +61,5 @@ public sealed class PrefixTrie<TValue>
             if (node.HasValue)
                 results.Add(node.Value!);
         }
-
-        return results;
     }
 }

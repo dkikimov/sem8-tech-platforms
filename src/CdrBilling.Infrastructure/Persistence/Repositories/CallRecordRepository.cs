@@ -1,16 +1,24 @@
+using System.Data;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using CdrBilling.Application.Abstractions;
 using CdrBilling.Application.DTOs;
 using CdrBilling.Domain.Entities;
 using CdrBilling.Domain.Enums;
+using CdrBilling.Domain.Services;
 using CdrBilling.Infrastructure.Persistence;
 using Dapper;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 
 namespace CdrBilling.Infrastructure.Persistence.Repositories;
 
-public sealed class CallRecordRepository(AppDbContext db, NpgsqlDataSource dataSource)
+public sealed class CallRecordRepository(
+    AppDbContext db,
+    NpgsqlDataSource dataSource,
+    ILogger<CallRecordRepository> logger)
     : ICallRecordRepository
 {
     public async Task BulkInsertAsync(IAsyncEnumerable<CallRecord> records, CancellationToken ct = default)
@@ -54,11 +62,57 @@ public sealed class CallRecordRepository(AppDbContext db, NpgsqlDataSource dataS
         await writer.CompleteAsync(ct);
     }
 
-    public IAsyncEnumerable<CallRecord> GetUnratedAsync(Guid sessionId, CancellationToken ct = default)
-        => db.CallRecords
-            .AsNoTracking()
-            .Where(r => r.SessionId == sessionId && r.ComputedCharge == null)
-            .AsAsyncEnumerable();
+    public async IAsyncEnumerable<TarificationCall> GetUnratedAsync(
+        Guid sessionId,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        var count = 0;
+
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, start_time, calling_party, called_party, direction, disposition, billable_sec
+            FROM call_records
+            WHERE session_id = @sessionId
+              AND computed_charge IS NULL
+            ORDER BY id
+            """;
+        cmd.Parameters.AddWithValue("sessionId", NpgsqlDbType.Uuid, sessionId);
+
+        await using var reader = await cmd.ExecuteReaderAsync(CommandBehavior.SequentialAccess, ct);
+        while (await reader.ReadAsync(ct))
+        {
+            count++;
+
+            var id = reader.GetInt64(0);
+            var startTime = reader.GetFieldValue<DateTimeOffset>(1);
+            var callingParty = reader.GetString(2);
+            var calledParty = reader.GetString(3);
+            var direction = Enum.Parse<CallDirection>(reader.GetString(4), ignoreCase: false);
+            var disposition = Enum.Parse<Disposition>(reader.GetString(5), ignoreCase: false);
+            var billableSec = reader.GetInt32(6);
+
+            yield return new TarificationCall(
+                id,
+                startTime,
+                direction,
+                disposition,
+                billableSec,
+                NormalizeDigits(direction == CallDirection.Outgoing
+                    ? calledParty
+                    : callingParty));
+        }
+
+        logger.LogInformation(
+            "Streamed {Count} unrated call records for session {SessionId} in {ElapsedMs} ms.",
+            count,
+            sessionId,
+            stopwatch.ElapsedMilliseconds);
+    }
+
+    public async Task<ICallRecordChargeBatchUpdater> CreateChargeBatchUpdaterAsync(CancellationToken ct = default)
+        => await CallRecordChargeBatchUpdater.CreateAsync(dataSource, logger, ct);
 
     public Task<int> CountAsync(Guid sessionId, CancellationToken ct = default)
         => db.CallRecords.CountAsync(r => r.SessionId == sessionId, ct);
@@ -67,45 +121,14 @@ public sealed class CallRecordRepository(AppDbContext db, NpgsqlDataSource dataS
         IEnumerable<(long Id, decimal Charge, long TariffId)> updates,
         CancellationToken ct = default)
     {
-        await using var conn = await dataSource.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
-
-        // Use a temp table + UPDATE FROM for batch efficiency
-        await using var cmd = conn.CreateCommand();
-        cmd.Transaction = tx;
-        cmd.CommandText = "CREATE TEMP TABLE tmp_charges (id BIGINT, charge NUMERIC(12,4), tariff_id BIGINT) ON COMMIT DROP";
-        await cmd.ExecuteNonQueryAsync(ct);
-
-        await using (var writer = await conn.BeginBinaryImportAsync(
-                         "COPY tmp_charges (id, charge, tariff_id) FROM STDIN (FORMAT BINARY)", ct))
-        {
-            foreach (var (id, charge, tariffId) in updates)
-            {
-                await writer.StartRowAsync(ct);
-                await writer.WriteAsync(id, NpgsqlDbType.Bigint, ct);
-                await writer.WriteAsync(charge, NpgsqlDbType.Numeric, ct);
-                await writer.WriteAsync(tariffId, NpgsqlDbType.Bigint, ct);
-            }
-            await writer.CompleteAsync(ct);
-        }
-
-        await using var updateCmd = conn.CreateCommand();
-        updateCmd.Transaction = tx;
-        updateCmd.CommandText = """
-            UPDATE call_records cr
-            SET computed_charge = tc.charge,
-                applied_tariff_id = tc.tariff_id
-            FROM tmp_charges tc
-            WHERE cr.id = tc.id
-            """;
-        await updateCmd.ExecuteNonQueryAsync(ct);
-
-        await tx.CommitAsync(ct);
+        await using var updater = await CreateChargeBatchUpdaterAsync(ct);
+        await updater.ApplyAsync(updates, ct);
     }
 
     public async Task<IReadOnlyList<SubscriberSummaryDto>> GetSummaryAsync(
         Guid sessionId, CancellationToken ct = default)
     {
+        var stopwatch = Stopwatch.StartNew();
         await using var conn = await dataSource.OpenConnectionAsync(ct);
 
         const string sql = """
@@ -148,8 +171,15 @@ public sealed class CallRecordRepository(AppDbContext db, NpgsqlDataSource dataS
 
         var rows = await conn.QueryAsync<SubscriberSummaryDto>(
             new CommandDefinition(sql, new { SessionId = sessionId }, commandTimeout: 180, cancellationToken: ct));
+        var items = rows.AsList();
 
-        return rows.AsList();
+        logger.LogInformation(
+            "Loaded summary for session {SessionId}: {Count} rows in {ElapsedMs} ms.",
+            sessionId,
+            items.Count,
+            stopwatch.ElapsedMilliseconds);
+
+        return items;
     }
 
     public async Task<PagedResult<CallRecordDetailDto>> GetDetailAsync(
@@ -159,6 +189,7 @@ public sealed class CallRecordRepository(AppDbContext db, NpgsqlDataSource dataS
         int pageSize,
         CancellationToken ct = default)
     {
+        var stopwatch = Stopwatch.StartNew();
         await using var conn = await dataSource.OpenConnectionAsync(ct);
 
         var phoneFilter = string.IsNullOrWhiteSpace(phoneNumber)
@@ -216,10 +247,117 @@ public sealed class CallRecordRepository(AppDbContext db, NpgsqlDataSource dataS
                 : null
         )).ToList();
 
+        logger.LogInformation(
+            "Loaded call detail page for session {SessionId}: page {Page}, size {PageSize}, total {TotalCount} in {ElapsedMs} ms.",
+            sessionId,
+            page,
+            pageSize,
+            totalCount,
+            stopwatch.ElapsedMilliseconds);
+
         return new PagedResult<CallRecordDetailDto>(items, page, pageSize, totalCount);
     }
 
-    // Flat projection for Dapper multi-column query
+    private static string NormalizeDigits(string input)
+    {
+        if (string.IsNullOrEmpty(input))
+            return string.Empty;
+
+        Span<char> buffer = stackalloc char[input.Length];
+        var length = 0;
+        foreach (var ch in input)
+        {
+            if (char.IsAsciiDigit(ch))
+                buffer[length++] = ch;
+        }
+
+        return length == 0 ? string.Empty : new string(buffer[..length]);
+    }
+
+    private sealed class CallRecordChargeBatchUpdater(
+        NpgsqlConnection connection,
+        ILogger logger)
+        : ICallRecordChargeBatchUpdater
+    {
+        private const string TempTableName = "tmp_charges";
+
+        public static async Task<CallRecordChargeBatchUpdater> CreateAsync(
+            NpgsqlDataSource dataSource,
+            ILogger logger,
+            CancellationToken ct)
+        {
+            var connection = await dataSource.OpenConnectionAsync(ct);
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = $"""
+                CREATE TEMP TABLE IF NOT EXISTS {TempTableName} (
+                    id BIGINT,
+                    charge NUMERIC(12,4),
+                    tariff_id BIGINT
+                ) ON COMMIT PRESERVE ROWS
+                """;
+            await cmd.ExecuteNonQueryAsync(ct);
+            return new CallRecordChargeBatchUpdater(connection, logger);
+        }
+
+        public async Task ApplyAsync(
+            IEnumerable<(long Id, decimal Charge, long TariffId)> updates,
+            CancellationToken ct = default)
+        {
+            var rows = updates as IReadOnlyCollection<(long Id, decimal Charge, long TariffId)> ?? updates.ToList();
+            if (rows.Count == 0)
+                return;
+
+            var stopwatch = Stopwatch.StartNew();
+            await using var tx = await connection.BeginTransactionAsync(ct);
+
+            await using (var truncateCmd = connection.CreateCommand())
+            {
+                truncateCmd.Transaction = tx;
+                truncateCmd.CommandText = $"TRUNCATE TABLE {TempTableName}";
+                await truncateCmd.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var writer = await connection.BeginBinaryImportAsync(
+                             $"COPY {TempTableName} (id, charge, tariff_id) FROM STDIN (FORMAT BINARY)", ct))
+            {
+                foreach (var (id, charge, tariffId) in rows)
+                {
+                    await writer.StartRowAsync(ct);
+                    await writer.WriteAsync(id, NpgsqlDbType.Bigint, ct);
+                    await writer.WriteAsync(charge, NpgsqlDbType.Numeric, ct);
+                    await writer.WriteAsync(tariffId, NpgsqlDbType.Bigint, ct);
+                }
+
+                await writer.CompleteAsync(ct);
+            }
+
+            await using (var updateCmd = connection.CreateCommand())
+            {
+                updateCmd.Transaction = tx;
+                updateCmd.CommandText = $"""
+                    UPDATE call_records cr
+                    SET computed_charge = tc.charge,
+                        applied_tariff_id = tc.tariff_id
+                    FROM {TempTableName} tc
+                    WHERE cr.id = tc.id
+                    """;
+                await updateCmd.ExecuteNonQueryAsync(ct);
+            }
+
+            await tx.CommitAsync(ct);
+
+            logger.LogDebug(
+                "Applied {Count} charge updates in {ElapsedMs} ms.",
+                rows.Count,
+                stopwatch.ElapsedMilliseconds);
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await connection.DisposeAsync();
+        }
+    }
+
     private sealed class CallRecordRow
     {
         public long Id { get; init; }

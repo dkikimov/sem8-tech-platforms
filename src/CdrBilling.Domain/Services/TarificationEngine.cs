@@ -12,6 +12,7 @@ public sealed record TariffMatch(TariffEntry Tariff, decimal Charge);
 public sealed class TarificationEngine
 {
     private readonly PrefixTrie<List<TariffEntry>> _trie = new PrefixTrie<List<TariffEntry>>();
+    private readonly List<List<TariffEntry>> _candidateLists = new(8);
 
     public TarificationEngine(IReadOnlyList<TariffEntry> tariffs)
     {
@@ -24,7 +25,7 @@ public sealed class TarificationEngine
     /// Finds the best-matching tariff for a given call record.
     /// Returns null if no applicable tariff exists (call remains unrated).
     /// </summary>
-    public TariffMatch? FindBestTariff(CallRecord call)
+    public TariffMatch? FindBestTariff(TarificationCall call)
     {
         // Only answered calls are billed
         if (call.Disposition != Disposition.Answered)
@@ -34,18 +35,12 @@ public sealed class TarificationEngine
         if (call.Direction == CallDirection.Internal)
             return null;
 
-        var numberToRate = call.Direction == CallDirection.Outgoing
-            ? call.CalledParty
-            : call.CallingParty;
-
-        // Strip non-digit characters for prefix matching
-        var digits = StripNonDigits(numberToRate);
-        if (string.IsNullOrEmpty(digits))
+        if (string.IsNullOrEmpty(call.DigitsToRate))
             return null;
 
         // Collect all tariff lists whose prefix matches a prefix of the number
-        var candidateLists = _trie.GetAllPrefixMatches(digits);
-        if (candidateLists.Count == 0)
+        _trie.CollectPrefixMatches(call.DigitsToRate, _candidateLists);
+        if (_candidateLists.Count == 0)
             return null;
 
         var callDate = DateOnly.FromDateTime(call.StartTime.UtcDateTime);
@@ -54,7 +49,7 @@ public sealed class TarificationEngine
 
         TariffEntry? best = null;
 
-        foreach (var list in candidateLists)
+        foreach (var list in _candidateLists)
         {
             foreach (var t in list)
             {
@@ -101,19 +96,4 @@ public sealed class TarificationEngine
         DayOfWeek.Saturday  => DayOfWeekMask.Saturday,
         _                   => DayOfWeekMask.Sunday
     };
-
-    private static string StripNonDigits(string input)
-    {
-        if (string.IsNullOrEmpty(input)) return string.Empty;
-
-        // Most phone numbers start with '+' — normalize to digits only
-        Span<char> buf = stackalloc char[input.Length];
-        var len = 0;
-        foreach (var ch in input)
-        {
-            if (char.IsAsciiDigit(ch))
-                buf[len++] = ch;
-        }
-        return new string(buf[..len]);
-    }
 }

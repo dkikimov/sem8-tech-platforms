@@ -1,8 +1,10 @@
 using CdrBilling.Application.Abstractions;
+using CdrBilling.Application.Options;
 using CdrBilling.Domain.Enums;
 using CdrBilling.Domain.Services;
 using MediatR;
 using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 
 namespace CdrBilling.Application.UseCases;
 
@@ -13,14 +15,15 @@ public sealed class RunTarificationHandler(
     ITariffRepository tariffRepo,
     IBillingSessionRepository sessionRepo,
     ISessionProgressReporter progress,
+    TarificationOptions tarificationOptions,
     ILogger<RunTarificationHandler> logger)
     : IRequestHandler<RunTarificationCommand>
 {
-    private const int BatchSize = 500;
-
     public async Task Handle(RunTarificationCommand request, CancellationToken cancellationToken)
     {
         var sessionId = request.SessionId;
+        var batchSize = Math.Clamp(tarificationOptions.BatchSize, 100, 20_000);
+        var stopwatch = Stopwatch.StartNew();
 
         try
         {
@@ -38,36 +41,52 @@ public sealed class RunTarificationHandler(
             var engine = new TarificationEngine(tariffs);
 
             logger.LogInformation(
-                "Tariffication started for session {SessionId}: {Total} records, {TariffCount} tariffs.",
-                sessionId, total, tariffs.Count);
+                "Tariffication started for session {SessionId}: {Total} records, {TariffCount} tariffs, batch size {BatchSize}.",
+                sessionId, total, tariffs.Count, batchSize);
 
             var processed = 0;
-            var updates = new List<(long Id, decimal Charge, long TariffId)>(BatchSize);
+            var matched = 0;
+            var processedSinceFlush = 0;
+            var updates = new List<(long Id, decimal Charge, long TariffId)>(batchSize);
+            await using var batchUpdater = await cdrRepo.CreateChargeBatchUpdaterAsync(cancellationToken);
 
             await foreach (var call in cdrRepo.GetUnratedAsync(sessionId, cancellationToken))
             {
                 var match = engine.FindBestTariff(call);
 
                 if (match is not null)
+                {
                     updates.Add((call.Id, match.Charge, match.Tariff.Id));
+                    matched++;
+                }
                 // Records with no tariff match keep ComputedCharge = null (unrated)
 
                 processed++;
+                processedSinceFlush++;
 
-                if (updates.Count >= BatchSize)
+                if (processedSinceFlush >= batchSize)
                 {
-                    await cdrRepo.BulkUpdateChargesAsync(updates, cancellationToken);
-                    updates.Clear();
+                    if (updates.Count > 0)
+                    {
+                        await batchUpdater.ApplyAsync(updates, cancellationToken);
+                        updates.Clear();
+                    }
+
+                    processedSinceFlush = 0;
                     await progress.ReportAsync(sessionId, processed, total, cancellationToken);
 
-                    logger.LogDebug("Tariffication progress: {Processed}/{Total}", processed, total);
+                    logger.LogDebug(
+                        "Tariffication progress: {Processed}/{Total}, matched {Matched}",
+                        processed,
+                        total,
+                        matched);
                 }
             }
 
             // Final flush
             if (updates.Count > 0)
             {
-                await cdrRepo.BulkUpdateChargesAsync(updates, cancellationToken);
+                await batchUpdater.ApplyAsync(updates, cancellationToken);
                 updates.Clear();
             }
 
@@ -81,8 +100,8 @@ public sealed class RunTarificationHandler(
             await progress.ReportCompletedAsync(sessionId, processed, total, cancellationToken);
 
             logger.LogInformation(
-                "Tariffication completed for session {SessionId}: {Processed} records processed.",
-                sessionId, processed);
+                "Tariffication completed for session {SessionId}: {Processed} records processed, {Matched} matched in {ElapsedMs} ms.",
+                sessionId, processed, matched, stopwatch.ElapsedMilliseconds);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

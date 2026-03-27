@@ -2,6 +2,8 @@ using CdrBilling.Application.Abstractions;
 using CdrBilling.Application.DTOs;
 using CdrBilling.Domain.Entities;
 using MediatR;
+using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 
 namespace CdrBilling.Application.UseCases;
 
@@ -14,14 +16,21 @@ public interface ICdrFileParser
 
 public sealed class UploadCdrHandler(
     ICdrFileParser parser,
-    ICallRecordRepository repo)
+    ICallRecordRepository repo,
+    ILogger<UploadCdrHandler> logger)
     : IRequestHandler<UploadCdrCommand, UploadResult>
 {
     public async Task<UploadResult> Handle(UploadCdrCommand request, CancellationToken cancellationToken)
     {
+        var stopwatch = Stopwatch.StartNew();
         var records = parser.ParseAsync(request.FileStream, request.SessionId, cancellationToken);
         var counter = new CountingEnumerable(records);
         await repo.BulkInsertAsync(counter, cancellationToken);
+        logger.LogInformation(
+            "Imported {Count} CDR records for session {SessionId} in {ElapsedMs} ms.",
+            counter.Count,
+            request.SessionId,
+            stopwatch.ElapsedMilliseconds);
         return new UploadResult(counter.Count, $"Imported {counter.Count} CDR records.");
     }
 

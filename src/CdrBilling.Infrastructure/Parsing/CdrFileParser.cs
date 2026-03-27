@@ -75,21 +75,29 @@ public sealed class CdrFileParser : ICdrFileParser
             if (string.IsNullOrWhiteSpace(text)) return null;
             if (IsHeader(text)) return null;
 
-            var parts = text.Split('|');
-            if (parts.Length < 12) return null;
+            var textSpan = text.AsSpan();
+            Span<Range> ranges = stackalloc Range[12];
+            if (!TrySplitIntoRanges(textSpan, '|', ranges)) return null;
 
-            var startTime  = DateTimeOffset.Parse(parts[0].Trim());
-            var endTime    = DateTimeOffset.Parse(parts[1].Trim());
-            var calling    = parts[2].Trim();
-            var called     = parts[3].Trim();
-            var direction  = ParseDirection(parts[4].Trim());
-            var disposition = ParseDisposition(parts[5].Trim());
-            var duration   = int.Parse(parts[6].Trim());
-            var billable   = int.Parse(parts[7].Trim());
-            decimal? charge = string.IsNullOrWhiteSpace(parts[8]) ? null : decimal.Parse(parts[8].Trim(), System.Globalization.CultureInfo.InvariantCulture);
-            var account    = parts[9].Trim() is { Length: > 0 } a ? a : null;
-            var callId     = parts[10].Trim();
-            var trunk      = parts[11].Trim() is { Length: > 0 } t ? t : null;
+            var startTime = DateTimeOffset.Parse(textSpan[ranges[0]].Trim());
+            var endTime = DateTimeOffset.Parse(textSpan[ranges[1]].Trim());
+            var calling = textSpan[ranges[2]].Trim().ToString();
+            var called = textSpan[ranges[3]].Trim().ToString();
+            var direction = ParseDirection(textSpan[ranges[4]].Trim());
+            var disposition = ParseDisposition(textSpan[ranges[5]].Trim());
+            var duration = int.Parse(textSpan[ranges[6]].Trim());
+            var billable = int.Parse(textSpan[ranges[7]].Trim());
+
+            var chargeSpan = textSpan[ranges[8]].Trim();
+            decimal? charge = chargeSpan.IsEmpty
+                ? null
+                : decimal.Parse(chargeSpan, System.Globalization.CultureInfo.InvariantCulture);
+
+            var accountSpan = textSpan[ranges[9]].Trim();
+            var account = accountSpan.IsEmpty ? null : accountSpan.ToString();
+            var callId = textSpan[ranges[10]].Trim().ToString();
+            var trunkSpan = textSpan[ranges[11]].Trim();
+            var trunk = trunkSpan.IsEmpty ? null : trunkSpan.ToString();
 
             return CallRecord.Create(sessionId, startTime, endTime, calling, called,
                 direction, disposition, duration, billable, charge, account, callId, trunk);
@@ -101,20 +109,40 @@ public sealed class CdrFileParser : ICdrFileParser
         }
     }
 
-    private static CallDirection ParseDirection(string value) => value.ToLowerInvariant() switch
+    private static bool TrySplitIntoRanges(ReadOnlySpan<char> text, char separator, Span<Range> ranges)
     {
-        "outgoing" => CallDirection.Outgoing,
-        "internal" => CallDirection.Internal,
-        _          => CallDirection.Incoming
-    };
+        var start = 0;
+        var count = 0;
 
-    private static Disposition ParseDisposition(string value) => value.ToLowerInvariant() switch
-    {
-        "answered"  => Disposition.Answered,
-        "busy"      => Disposition.Busy,
-        "no_answer" => Disposition.NoAnswer,
-        _           => Disposition.Failed
-    };
+        for (var i = 0; i < text.Length; i++)
+        {
+            if (text[i] != separator)
+                continue;
+
+            if (count >= ranges.Length)
+                return false;
+
+            ranges[count++] = start..i;
+            start = i + 1;
+        }
+
+        if (count != ranges.Length - 1)
+            return false;
+
+        ranges[count] = start..text.Length;
+        return true;
+    }
+
+    private static CallDirection ParseDirection(ReadOnlySpan<char> value)
+        => value.Equals("outgoing".AsSpan(), StringComparison.OrdinalIgnoreCase) ? CallDirection.Outgoing
+         : value.Equals("internal".AsSpan(), StringComparison.OrdinalIgnoreCase) ? CallDirection.Internal
+         : CallDirection.Incoming;
+
+    private static Disposition ParseDisposition(ReadOnlySpan<char> value)
+        => value.Equals("answered".AsSpan(), StringComparison.OrdinalIgnoreCase) ? Disposition.Answered
+         : value.Equals("busy".AsSpan(), StringComparison.OrdinalIgnoreCase) ? Disposition.Busy
+         : value.Equals("no_answer".AsSpan(), StringComparison.OrdinalIgnoreCase) ? Disposition.NoAnswer
+         : Disposition.Failed;
 
     private static bool IsHeader(string line)
         => line.StartsWith("StartTime|", StringComparison.OrdinalIgnoreCase);

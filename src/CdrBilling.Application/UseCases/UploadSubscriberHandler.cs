@@ -2,6 +2,8 @@ using CdrBilling.Application.Abstractions;
 using CdrBilling.Application.DTOs;
 using CdrBilling.Domain.Entities;
 using MediatR;
+using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 
 namespace CdrBilling.Application.UseCases;
 
@@ -14,13 +16,20 @@ public interface ISubscriberFileParser
 
 public sealed class UploadSubscriberHandler(
     ISubscriberFileParser parser,
-    ISubscriberRepository repo)
+    ISubscriberRepository repo,
+    ILogger<UploadSubscriberHandler> logger)
     : IRequestHandler<UploadSubscriberCommand, UploadResult>
 {
     public async Task<UploadResult> Handle(UploadSubscriberCommand request, CancellationToken cancellationToken)
     {
+        var stopwatch = Stopwatch.StartNew();
         var subscribers = parser.Parse(request.FileStream, request.SessionId).ToList();
         await repo.BulkInsertAsync(subscribers, cancellationToken);
+        logger.LogInformation(
+            "Imported {Count} subscribers for session {SessionId} in {ElapsedMs} ms.",
+            subscribers.Count,
+            request.SessionId,
+            stopwatch.ElapsedMilliseconds);
         return new UploadResult(subscribers.Count, $"Imported {subscribers.Count} subscribers.");
     }
 }

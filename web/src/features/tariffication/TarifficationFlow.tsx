@@ -12,6 +12,7 @@ import { uploadTemplates } from '../../uploadTemplates'
 import { FilesRow } from './components/FilesRow'
 import { SessionResultsPanel } from './results/SessionResultsPanel'
 import type { ResultsModel } from './results/SessionResultsPanel'
+import { useTarifficationResultsState } from './state/TarifficationResultsContext'
 import { useTarifficationUiState } from './state/TarifficationUiStateContext'
 import { useTarifficationSessionState } from './state/TarifficationSessionContext'
 import { addCachedSession } from '../history/sessionCache'
@@ -42,19 +43,22 @@ export function TarifficationFlow() {
     finishedAtMs,
     processingStatus,
     progress,
-    summary,
-    callRecords,
-    phoneFilter,
     setSessionId,
     setStartedAtMs,
     setFinishedAtMs,
     setProcessingStatus,
     setProgress,
+    resetSession,
+  } = useTarifficationSessionState()
+  const {
+    summary,
+    callRecords,
+    phoneFilter,
     setSummary,
     setCallRecords,
     setPhoneFilter,
-    resetSession,
-  } = useTarifficationSessionState()
+    resetResults,
+  } = useTarifficationResultsState()
   const readyToStart = useMemo(() => uploadTemplates.every((t) => Boolean(uploadedFiles[t.kind])), [uploadedFiles])
   const resultsModel = useMemo(
     () =>
@@ -91,14 +95,6 @@ export function TarifficationFlow() {
   }, [setSummary])
 
   useEffect(() => {
-    if (!sessionId || isRunning) return
-    if (summary.length > 0) return
-    void fetchSummary(sessionId).catch((err) => {
-      setError(err instanceof Error ? err.message : 'Не удалось загрузить результаты.')
-    })
-  }, [fetchSummary, isRunning, sessionId, summary.length])
-
-  useEffect(() => {
     if (!sessionId || !startedAtMs || finishedAtMs) return
     const id = window.setInterval(() => setNowMs(Date.now()), 100)
     return () => window.clearInterval(id)
@@ -108,8 +104,7 @@ export function TarifficationFlow() {
     setError('')
     setProcessingStatus('')
     setProgress(null)
-    setSummary([])
-    setCallRecords(null)
+    resetResults()
     closeProgressStream()
     setIsRunning(true)
     setStartedAtMs(Date.now())
@@ -173,6 +168,7 @@ export function TarifficationFlow() {
     setIsRunning(false)
     setError('')
     resetSession()
+    resetResults()
     resetUploadedFiles()
   }
 
