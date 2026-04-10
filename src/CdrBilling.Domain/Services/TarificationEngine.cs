@@ -70,8 +70,9 @@ public sealed class TarificationEngine
         if (best is null)
             return null;
 
-        var charge = best.ConnectionFee + (call.BillableSec / 60m) * best.RatePerMin;
-        charge = Math.Round(charge, 4, MidpointRounding.AwayFromZero);
+        var roundedBillableMinutes = (int)Math.Ceiling(Math.Max(call.BillableSec, 0) / 60m);
+        var charge = best.ConnectionFee + roundedBillableMinutes * best.RatePerMin;
+        charge = Math.Round(charge, 2, MidpointRounding.AwayFromZero);
 
         return new TariffMatch(best, charge);
     }
