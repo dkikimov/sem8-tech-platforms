@@ -5,4 +5,7 @@
     <Project Path="src/CdrBilling.Domain/CdrBilling.Domain.csproj" />
     <Project Path="src/CdrBilling.Infrastructure/CdrBilling.Infrastructure.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CdrBilling.Domain.Tests/CdrBilling.Domain.Tests.csproj" />
+  </Folder>
 </Solution>
